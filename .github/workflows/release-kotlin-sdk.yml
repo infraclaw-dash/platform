@@ -65,10 +65,9 @@ jobs:
       sha: ${{ steps.resolve-sha.outputs.sha }}
 
     steps:
-      # Same idempotent host check as kotlin-sdk-build.yml, plus gh (used by
-      # the tag validation below and preinstalled only on hosted images). Runs
-      # before checkout so the validation step can rely on gh.
-      - name: Ensure runner dependencies
+      # The versioned runner image owns native tools. Release jobs verify the
+      # environment; they must not mutate root-owned packages or the Android SDK.
+      - name: Verify provisioned runner dependencies
         run: |
           set -euo pipefail
 
@@ -76,15 +75,10 @@ jobs:
           for pkg in build-essential cmake curl gh jq libgmp-dev libpulse0 libssl-dev libx11-xcb1 pkg-config python3 unzip zip; do
             dpkg -s "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
           done
+          [ -x "$HOME/.cargo/bin/rustup" ] || MISSING+=(rustup)
           if [ ${#MISSING[@]} -gt 0 ]; then
-            echo "Installing: ${MISSING[*]}"
-            sudo apt-get update -qq
-            sudo apt-get install -qq --yes "${MISSING[@]}"
-          fi
-
-          if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --no-modify-path --default-toolchain none
+            echo "::error::Provision the pinned runner image with: ${MISSING[*]}"
+            exit 1
           fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
@@ -167,6 +161,9 @@ jobs:
           ref: ${{ steps.release-ref.outputs.checkout_ref }}
           persist-credentials: false
 
+      - name: Verify exact runner requirements and load versions
+        run: python3 .github/scripts/runner-image.py verify
+
       - name: Resolve built commit SHA
         id: resolve-sha
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -180,13 +177,16 @@ jobs:
           echo "JAVA_HOME=$JAVA_HOME_RESOLVED" >> "$GITHUB_ENV"
           echo "$JAVA_HOME_RESOLVED/bin" >> "$GITHUB_PATH"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: >-
-            platforms;android-35
-            build-tools;35.0.0
-            ndk;28.1.13356709
+      - name: Verify prebaked Android SDK
+        run: |
+          set -euo pipefail
+          test "${ANDROID_HOME:-}" = /opt/android-sdk
+          test -x "$ANDROID_HOME/ndk/28.1.13356709/ndk-build"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          # setup-android tries to replace root-owned command-line tools. The
+          # pinned image already supplies every component this release uses.
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
